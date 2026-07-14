@@ -1,0 +1,22 @@
+node_modules
+.next
+out
+build
+*.log
+
+# env & secrets
+.env
+.env*.local
+
+# prisma / sqlite
+prisma/*.db
+prisma/*.db-journal
+dev.db
+dev.db-journal
+
+# os
+.DS_Store
+Thumbs.db
+
+# test artifacts
+.playwright-mcp

@@ -133,9 +133,17 @@ src/
 | PATCH \| DELETE | `/api/bookmarks/:id` | Rename \| delete (ownership-checked) |
 | GET | `/api/progress` | Continue-watching / recently-watched |
 | POST | `/api/progress` | Upsert watch position `{ videoId, positionSec, durationSec }` |
+| GET | `/api/health` | Readiness probe — `200 {status:"ready"}` or `503` naming the DB fault |
 
 All mutation routes require a valid session and validate input with Zod; bookmark/progress
 rows are scoped to the authenticated user.
+
+`/api/health` is public and unauthenticated by design — a readiness probe is useless if it
+needs the database it is checking. It runs `SELECT 1` and, on failure, classifies the cause
+to a fixed slug (`url_missing`, `url_wrong_protocol`, `auth_failed`, `unreachable`,
+`schema_missing`) with a remediation hint, reporting each connection string's scheme and
+length but never its value. That keeps a misconfigured deploy self-diagnosing without
+leaking the host or password into a public response.
 
 ---
 

@@ -77,7 +77,20 @@ schema uses no SQLite-specific types.
 
 Then **Deployments → ⋯ → Redeploy**. Env vars only apply to new builds.
 
-### 4. Verify on the live URL
+### 4. Check the readiness probe first
+
+```
+https://<your-app>.vercel.app/api/health
+```
+
+`{"status":"ready","db":"up"}` means Postgres is connected. A `503` names the fault and its
+fix, and reports the scheme and length of each connection string the running instance
+actually received — which is the fastest way to catch the most common failure of all: an
+env var edited in the dashboard but never redeployed, or edited for the wrong environment.
+**Saving a variable does not redeploy.** Vercel binds the environment when a deployment is
+created, so a running function keeps its old values until you redeploy.
+
+### 5. Verify the flows on the live URL
 
 Not "the deploy went green" — drive it:
 

@@ -1,96 +1,120 @@
-# Vercel Deployment — Error Review & Fix
+# Deploying to Vercel
 
 ## The error
 
+The build succeeds, but every request that touches the database returns 500:
+
 ```
-Error: AUTH_SECRET must be set to a 32+ character secret in production.
-    at .next/server/app/api/auth/login/route.js
-> Build error occurred
-[Error: Failed to collect page data for /api/auth/login]
-Command "npm run build" exited with 1
+POST /api/auth/login  500
+PrismaClientInitializationError:
+  Invalid `prisma.user.findUnique()` invocation:
+  Error querying the database: Error code 14: Unable to open the database file
 ```
+
+`/api/auth/signup` fails identically on `prisma.user.create()`. Both are the same fault —
+Prisma cannot open the database, so it fails before any auth logic runs.
 
 ## Root cause
 
-The build failed at `next build` → **"Collecting page data"**. To collect page data,
-Next.js **imports every route module**, including `/api/auth/login`, which imports
-`src/lib/auth.ts`.
+SQLite error code 14 is `SQLITE_CANTOPEN`. `DATABASE_URL` was `file:./dev.db` — a **file on
+local disk**. That cannot work on Vercel, for two independent reasons:
 
-That module used to validate `AUTH_SECRET` at the **top level** (module load), so the check
-ran during the build, not at request time:
+1. **The file was never deployed.** `prisma/dev.db` is git-ignored (correctly — it's a build
+   artifact). The serverless bundle has no such file, so there is nothing to open.
+2. **Even if it were, it couldn't persist.** Vercel's serverless filesystem is read-only
+   outside `/tmp`, and `/tmp` is ephemeral and per-instance. A signup written by one
+   invocation would be invisible to the next and gone within minutes.
 
-```ts
-// old — runs the moment the module is imported, including during `next build`
-if (process.env.NODE_ENV === "production" && (!RAW_SECRET || RAW_SECRET.length < 32)) {
-  throw new Error("AUTH_SECRET must be set to a 32+ character secret in production.");
-}
-```
+This is not a Prisma bug or a config typo. A single-file embedded database is structurally
+incompatible with a stateless, horizontally-scaled runtime. The build passing is expected —
+`next build` never opens a connection, so the fault only surfaces at request time.
 
-On Vercel, `.env` is git-ignored (correct — secrets must never be committed), so
-`AUTH_SECRET` was never provided. `NODE_ENV` is `production` during a Vercel build → the
-guard threw → build aborted.
+## Fix — Supabase Postgres
 
-## Fix — two parts
+Postgres is a network service, so any number of serverless instances can reach the same
+data. Supabase provides managed Postgres plus **Supavisor**, a connection pooler — which
+serverless specifically needs, because each invocation would otherwise open its own
+connection and exhaust Postgres' connection limit under modest traffic.
 
-### 1. Code (done) — validate lazily, not at import
+### 1. Code (done)
 
-`src/lib/auth.ts` now resolves the secret on **first token operation** via `getSecret()`,
-not at module load. `next build` can import the module without a secret present; a real
-production request still fails fast if the secret is missing or too short. Verified: a
-production build with **no `.env`** now completes with exit 0.
+| File | Change |
+|---|---|
+| `prisma/schema.prisma` | `provider = "sqlite"` → `"postgresql"`; added `directUrl` |
+| `.env.example` | Documents `DATABASE_URL` (pooled) + `DIRECT_URL` (direct) |
+| `src/lib/db.ts` | Client is now reused across warm invocations, not just dev hot-reloads |
 
-### 2. Config (you must do this in Vercel) — set the environment variables
+**Why two URLs.** The app runs through the *transaction* pooler (port 6543), which
+multiplexes many short-lived connections onto few Postgres backends. Transaction mode
+cannot hold a session, so it cannot run DDL — `prisma db push`, `migrate`, and `seed` use
+`DIRECT_URL` (session pooler, port 5432) instead.
 
-The app still needs a real `AUTH_SECRET` to actually run. In the Vercel dashboard:
+No application code changed. Prisma's query API is identical across providers, and the
+schema uses no SQLite-specific types.
 
-**Project → Settings → Environment Variables**, add for **Production** (and **Preview**):
+### 2. Create the Supabase project (you must do this)
 
-| Key | Value | Notes |
-|---|---|---|
-| `AUTH_SECRET` | a 32+ char random string | generate: `openssl rand -base64 32` |
-| `DATABASE_URL` | your database URL | **see the SQLite caveat below** |
+1. Create a project at [supabase.com/dashboard](https://supabase.com/dashboard) — free tier
+   is sufficient. Save the database password it generates; it is shown once.
+2. **Connect → ORMs → Prisma** gives both strings. Copy them into a local `.env`
+   (`cp .env.example .env`), substituting your password.
+3. Create the tables and seed the catalog. Either:
+   - **SQL Editor** (no local setup needed) — paste [`supabase/setup.sql`](supabase/setup.sql)
+     and Run. Creates all four tables, enables RLS, seeds 6 lessons + the demo account.
+   - **From your machine** — `npm run db`, which does the same thing.
+4. The last statement of `setup.sql` reports `users = 1, videos = 6, rls_enabled = 4`.
+   Anything else means a step didn't apply.
 
-Then **Deployments → ⋯ → Redeploy** (env vars only apply to new builds).
+### 3. Set the Vercel environment variables
 
----
+**Project → Settings → Environment Variables**, for **Production** *and* **Preview**:
 
-## ⚠️ Bigger blocker: SQLite does not work on Vercel
+| Key | Value |
+|---|---|
+| `DATABASE_URL` | Supavisor transaction string, port **6543**, ending `?pgbouncer=true&connection_limit=1` |
+| `DIRECT_URL` | Supavisor session string, port **5432** |
+| `AUTH_SECRET` | 32+ random chars — `openssl rand -base64 32` |
 
-Fixing `AUTH_SECRET` makes the **build** pass, but the app will **not function** on Vercel
-with `DATABASE_URL="file:./dev.db"`:
+Then **Deployments → ⋯ → Redeploy**. Env vars only apply to new builds.
 
-- Vercel's serverless filesystem is **read-only** (except `/tmp`) and **ephemeral** — a file
-  written by one request is gone on the next invocation.
-- The seeded `dev.db` is git-ignored, so it isn't even in the deployment.
+### 4. Verify on the live URL
 
-**Options to make it truly run in production:**
+Not "the deploy went green" — drive it:
 
-1. **Turso / libSQL** (least change) — hosted SQLite-compatible. Keep Prisma's `sqlite`
-   provider, point `DATABASE_URL` at the Turso URL + auth token. Best if you want to keep
-   the current schema untouched.
-2. **Vercel Postgres / Neon / Supabase** (most standard) — change `schema.prisma` provider
-   to `postgresql`, set `DATABASE_URL` to the Postgres connection string, run
-   `prisma migrate deploy` (or `prisma db push`) + seed against it.
-3. **Demo-only, no persistence** — leave it as a local-only project and submit the repo +
-   screen recording (the DB runs perfectly with `npm run db` locally). Deployment is
-   optional per the assignment.
+1. Log in as `demo@gvcc.dev` / `password123` → expect **200**, not 500.
+2. Sign up a new account → then log out and log back in. This proves the write *persisted*
+   in Postgres rather than in one instance's memory.
+3. Bookmark a video, hard-refresh → the bookmark is still there.
 
-For a graded submission, **Option 1 (Turso)** is the fastest path to a working live link; the
-README already notes SQLite → Postgres is a one-line `DATABASE_URL` swap for Option 2.
+## Security note
 
----
+The `public` schema is reachable through Supabase's Data API (PostgREST) for anyone holding
+the project's anon key. This app never uses supabase-js and never ships that key to the
+browser, but the tables should not be publicly readable regardless — so `setup.sql` enables
+RLS on all four with no policies, which denies the Data API everything. Prisma is
+unaffected: it connects as `postgres`, which owns the tables, and a table owner bypasses its
+own RLS. Authorization stays where it already is — the session check in each route handler.
 
-## Also seen in the log (non-blocking)
+If you ran `npm run db` instead of `setup.sql`, apply section 4 of that file separately;
+`prisma db push` does not manage RLS.
 
-- `prisma generate` deprecation of `package.json#prisma` and Prisma 6→7 update notice —
-  informational, safe to ignore for now.
-- `eslint@8` / `rimraf` / `glob` deprecation warnings from transitive deps — no action needed.
+## Known limitation — rate limiting
+
+`src/lib/ratelimit.ts` keeps its counters in process memory. On Vercel each instance has its
+own, so the effective limit scales with instance count and resets on cold start. Adequate
+for this project; a real deployment would move the counters to Redis or Postgres.
+
+## Also in the build log (non-blocking)
+
+- `package.json#prisma` deprecation and the Prisma 6→7 notice — informational.
+- `eslint@8` / `rimraf` / `glob` deprecation warnings from transitive deps — no action.
 
 ## Summary
 
 | Item | Status |
 |---|---|
-| Top-level `AUTH_SECRET` throw crashing the build | **Fixed in code** (lazy validation) |
-| `AUTH_SECRET` env var in Vercel | **You must set it** (32+ chars) |
-| `DATABASE_URL` / SQLite on serverless | **Needs a hosted DB** (Turso/Postgres) to run live |
-| Production build passes with no `.env` | **Verified locally, exit 0** |
+| SQLite on serverless (`code 14`) | **Fixed** — schema now targets Postgres |
+| Connection pooling for serverless | **Handled** — transaction pooler + client reuse |
+| Supabase project + `npm run db` | **You must do this** |
+| `DATABASE_URL` / `DIRECT_URL` / `AUTH_SECRET` in Vercel | **You must set these** |
+| RLS enabled on all four tables | **You must run the SQL above** |

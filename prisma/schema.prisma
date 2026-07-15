@@ -2,9 +2,13 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Supabase Postgres. `url` is the Supavisor transaction pooler (port 6543) — the only mode
+// that survives serverless' many short-lived connections. Migrations and `db push` can't run
+// through a transaction pooler, so they use `directUrl` (session pooler, port 5432).
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {

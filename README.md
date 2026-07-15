@@ -14,7 +14,7 @@ assignment with a focus on clean, reusable code and a polished, responsive UI.
 |---|---|---|
 | Framework | **Next.js 15** (App Router) + React 19 | One codebase for UI + API routes; easy deploy |
 | Language | **TypeScript** (strict) | Type-safe end to end |
-| Database | **Prisma + SQLite** | Zero-config, runs anywhere; swap `DATABASE_URL` for Postgres in prod |
+| Database | **Prisma + Postgres** (Supabase) | Managed, connection-pooled; works on serverless, where a SQLite file cannot |
 | Auth | **bcryptjs + JWT (jose)** in an httpOnly cookie | Minimal, dependency-light, edge-safe |
 | Validation | **Zod** | Every external input validated before it touches the DB |
 | Styling | Hand-authored token-based CSS | Distinctive look, no framework weight |
@@ -23,11 +23,14 @@ assignment with a focus on clean, reusable code and a polished, responsive UI.
 
 ## Run locally
 
-Requires Node 18+.
+Requires Node 18+ and a Postgres database. The fastest path is a free Supabase project —
+create one, then copy **Connect → ORMs → Prisma** into `.env` (see `.env.example` for which
+string goes in `DATABASE_URL` vs `DIRECT_URL`, and why there are two).
 
 ```bash
+cp .env.example .env # then fill in DATABASE_URL, DIRECT_URL, AUTH_SECRET
 npm install          # installs deps + generates the Prisma client
-npm run db           # creates the SQLite DB, applies schema, seeds videos + demo user
+npm run db           # applies the schema, seeds videos + demo user
 npm run dev          # http://localhost:3000
 ```
 
@@ -137,7 +140,7 @@ rows are scoped to the authenticated user.
 ---
 
 ## Notes
-- `.env` holds `DATABASE_URL` and `AUTH_SECRET` (dev defaults committed for convenience —
-  **change `AUTH_SECRET` for any real deployment**).
+- `.env` holds `DATABASE_URL`, `DIRECT_URL`, and `AUTH_SECRET`, and is git-ignored — copy
+  `.env.example` and fill in your own. The same three must be set in the Vercel dashboard.
 - Sample videos are small CC0 clips bundled locally under `public/videos/` (served from the app,
   no external host) — so playback works offline and never breaks on a dead/blocked CDN.

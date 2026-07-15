@@ -61,12 +61,32 @@ function classify(e: unknown): { fault: DbFault; code: string | null; hint: stri
     : { fault: "unknown", code, hint: "Unrecognized database fault — check the runtime logs." };
 }
 
+// Scheme and length only — never the value. Enough to prove which connection string the
+// running instance actually received, without exposing host, user, or password.
+function describeUrl(value: string | undefined) {
+  if (!value) return { set: false };
+  return {
+    set: true,
+    scheme: value.match(/^[a-z][a-z0-9+.-]*:(\/\/)?/i)?.[0] ?? "(unrecognized)",
+    length: value.length,
+  };
+}
+
+const env = () => ({
+  DATABASE_URL: describeUrl(process.env.DATABASE_URL),
+  DIRECT_URL: describeUrl(process.env.DIRECT_URL),
+  AUTH_SECRET: { set: Boolean(process.env.AUTH_SECRET) },
+});
+
 export async function GET() {
   try {
     await db.$queryRaw`SELECT 1`;
     return NextResponse.json({ status: "ready", db: "up" });
   } catch (e) {
     console.error("GET /api/health", e);
-    return NextResponse.json({ status: "degraded", db: "down", ...classify(e) }, { status: 503 });
+    return NextResponse.json(
+      { status: "degraded", db: "down", ...classify(e), env: env() },
+      { status: 503 },
+    );
   }
 }
